@@ -18,8 +18,11 @@ def load_specific_json(year, month, day, root_directory):
 
 cge_blueprint = Blueprint('recurso1', __name__)
 
-@cge_blueprint.route('/recurso1', methods=['GET'])
-def get_all_ocurrencies():
-    directory =  os.getcwd() + "/app/api/v1/cge_data/cge_json_files"
-    json_file = load_specific_json(2022, 1, 2, directory)
+@cge_blueprint.route('/recurso1/<int:ano>/<int:mes>/<int:dia>', methods=['GET'])
+def get_all_ocurrencies(ano, mes, dia):
+    directory = os.getcwd() + "/app/api/v1/cge_data/cge_json_files"
+    
+    # Utilizando os parâmetros passados na URL para chamar a função
+    json_file = load_specific_json(ano, mes, dia, directory)
+    
     return jsonify(json_file)
