@@ -63,7 +63,7 @@ def get_jsons_by_day(dia, mes, ano):
     return None
 
 def generate_json():
-    start_date = date(2022, 3, 16)
+    start_date = date(2022, 5, 31)
     end_date = date.today()
     delta = timedelta(days=1)
 

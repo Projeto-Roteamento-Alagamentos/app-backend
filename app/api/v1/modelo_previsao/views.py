@@ -16,7 +16,19 @@ def handle_geojson():
     if 'type' not in data or data['type'] != 'FeatureCollection':
         return jsonify({"error": "Invalid GeoJSON"}), 400
 
-    if 'properties' not in data or 'horario_saida' not in data['properties']:
-        return jsonify({"error": "Missing horario_saida in properties"}), 400
+    point1 = data['features'][0]['geometry']['coordinates']
+    point2 = data['features'][1]['geometry']['coordinates']
 
-    return jsonify({"message": "GeoJSON received successfully"}), 200
+    linestring =  {
+    "type": "FeatureCollection",
+    "features": [{
+        "type": "Feature",
+        "geometry": {
+            "type": "LineString",
+            "coordinates": [[point1[1], point1[0]], [point2[1], point2[0]]]
+        }
+    }
+    ]
+  } 
+
+    return jsonify(linestring), 200
