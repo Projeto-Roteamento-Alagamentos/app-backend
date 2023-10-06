@@ -3,11 +3,140 @@ import osmnx as ox
 import networkx as nx
 import geopandas as gpd
 import json
+import pyproj
+from geopy import distance
+from datetime import datetime 
+import copy
+from shapely.geometry import Point
+import shutil
+import os
+import requests
+import pandas as pd
+
 
 modelo_blueprint = Blueprint('modelo_previsao', __name__)
 
 graph_filename = "./app/api/v1/modelo_previsao/graph.graphml"
 
+# Definindo funções auxiliares convert_coordinates, oracle e is_flooded
+def oracle (grafo, path, initial_point, tyme):
+    """
+    Predicts the node and crossed edges after a given time in a given path.
+
+    :param grafo (Grafo): An instance of the Grafo class in which the path is
+        contained.
+    :param path (list): A list of edges that representa a path in the grafo.
+    :param initial_point (int): ID of the initial point in the path.
+    :param tyme (int): Time in seconds.
+
+    :return next_node, crossed_edges (tuple): Next node after the given
+        time and a list of edges crossed on the way.
+    """
+
+    # Find the initial point within the path
+    initial_indices = [i for i in range(len(path)) if path[i] == initial_point]
+
+    # If the initial point is not in the path, return the initial point and
+    # an empty list:
+    if len(initial_indices) == 0:
+        print(f"The node {initial_point} is not in {path}.")
+        return initial_point, []
+
+    # Otherwise, if the initial point is in the path, that is, if
+    # initial_indices != []:
+    else:
+        n = initial_indices[0]
+        next_node = initial_point
+        crossed_edges = []
+
+        # While there is: time left to cross the path and points in the path
+        # to be crossed
+        while tyme > 0 and n < len(path)-1:
+            current_node = path[n]
+            next_node = path[n+1]
+
+            # Find the edge in the graph
+            e = grafo.find_edge_by_nodes(current_node, next_node)
+            crossed_edges.append(e)
+
+            # Update the time left
+            tyme -= grafo.graph.edges[e]['travel_time']
+
+            # Update the index for the next step
+            n += 1
+
+        return next_node, crossed_edges
+
+def convert_coordinates (longitude, latitude):
+    """
+    Converts coordinates from EPSG 4326 system to UTM 23S system.
+
+    :param longitude (float): Longitude coordinate.
+    :param latitude (float): Latitude coordinate.
+
+    :return (tuple): Converted coordinates in UTM 23S system.
+    """
+
+    utm23s = pyproj.CRS.from_string('+proj=utm +zone=23 +south +ellps=WGS84 +datum=WGS84 +units=m +no_defs')
+    epsg4326 = pyproj.CRS.from_epsg(4326)
+    transformer = pyproj.Transformer.from_crs(utm23s, epsg4326)
+
+    return transformer.transform(longitude, latitude)
+
+def is_flooded (graph, edge, flooded_points):
+    """
+    Checks if a given edge of a graph is within 200 meters of a reported
+    flooded point.
+
+    :param graph (networkx.Graph): Graph object.
+    :param edge (tuple): Edge in the graph.
+    :param flooded_points (list): List of flooded points.
+
+    :return tf (bool): True if edge is near a flooded point, False otherwise.
+    """
+
+    # Gather the coordinates of several points along the edge
+    if 'geometry' in graph.edges[edge]:
+        lonlats = list(graph.edges[edge]['geometry'].coords)
+    else:
+        lonlats = []
+
+    initial = edge[0]
+    lon, lat = graph.nodes[initial]['x'], graph.nodes[initial]['y']
+    lonlats.append((lon, lat))
+
+    final = edge[1]
+    lon, lat = graph.nodes[final]['x'], graph.nodes[final]['y']
+    lonlats.append((lon, lat))
+
+    # List of (latitudes, longitudes) of the points of the edge
+    latlons = [(y, x) for x, y in lonlats]
+
+    # Determine whether any of the points of the edge are closer to 200 meters
+    # of any of the flooded points (tf = True) or not (tf = False)
+    tf = False
+    for p in latlons:
+        for q in flooded_points:
+            if distance.great_circle(p, q).meters < 200:
+                tf = True
+                break
+
+    return tf
+
+## Only minimize the time
+def time_no_rain (graph, edge, flooded_points, rains):
+    return graph.edges[edge]['travel_time']
+
+## Only minimize the length
+def length_no_rain (graph, edge, flooded_points, rains):
+    return graph.edges[edge]['length']
+
+## Minimize the time, taking into account rain and floods
+def proposed (graph, edge, flooded_points, rains):
+    if is_flooded(graph, edge, flooded_points):
+        return float('inf')
+    else:
+        return graph.edges[edge]['travel_time'] * (1 + rains[edge]/100)
 
 # Remeber to put in other file
 class Grafo:
@@ -201,7 +330,6 @@ class Agora:
 
         return flooding_points
 
-
 class Radar:
 
     def __init__ (self, lat0, lon0, dlat, dlon):
@@ -318,8 +446,112 @@ class Radar:
 
         return max(rainfall)
 
-dlat = -0.0090014
-dlon = 0.009957
+class Experiment:
+
+    def __init__ (self, origin, destination, agora, grafo, radar):
+        """
+        Initializes an experiment object with the given parameters.
+
+        :param origin (tuple): The coordinates of the start location.
+        :param destination (tuple): The coordinates of the end location.
+        :param agora: An instace of the Agora class that represents the
+            initial time (time of departure of the vehicle).
+        :param grafo: An instace of the Grafo class that represents the road
+            network.
+        :param radar: An instance of the Radar class that represents the
+            radar that will provide information on precipitation.
+        """
+
+        self.origin = grafo.get_nearest_node(*origin)
+        self.destination = grafo.get_nearest_node(*destination)
+        self.agora = agora
+        self.grafo = grafo
+        self.radar = radar
+
+    def experiment (self, weight):
+        """
+        Calculates the path that minimizes a certain function (weight).
+
+        :param weight (function): The weight function used to calculate the
+            weights of edges in the graph.
+
+        :return edge_rains (dict): A dictionary containing the edges of the
+            optimal path and their corresponding rainfall values (at the time
+            of travel).
+        """
+
+        # Parameters
+        start = copy.deepcopy(self.origin)
+        time = copy.deepcopy(self.agora)
+
+        print("gaay")
+        graph = self.grafo.crop(self.origin, self.destination)
+
+        # Dicionary where we will save infomation about the path
+        edge_rains = {}
+        print("gay")
+        # Main loop
+        while start != self.destination:
+
+            print("gay")
+
+            # Update: list of fooded points, matrix with rain info and weigths
+            flooding_points = time.get_flooding_points()
+
+            if self.radar.rain_by_time(time):
+                A = self.radar.rain_by_time(time)
+                rains = {e: self.radar.rain_at_edge(graph, e, time) for e in graph.edges}
+                weights = {e: weight(graph, e, flooding_points, rains) for e in graph.edges}
+                nx.set_edge_attributes(graph, weights, 'weight')
+            else:
+                rains = {e: 0 for e in graph.edges}
+
+            # Calculate the path with the least rain
+            shortest_path = nx.astar_path(graph, start, self.destination, weight='weight')
+
+            # Add 10 minutes to the current time for the next iteration
+            time.step(600)
+
+            # Predict where the start of the next iteration will be
+            start, subpath = oracle(self.grafo, shortest_path, shortest_path[0], 600)
+
+            # Save the information of the edges that will be crossed
+            for e in subpath:
+                edge_rains[e] = rains[e]
+
+        return edge_rains
+
+    def analysis (self, dictionary):
+        """
+        Prints the results of the output of an experiment.
+
+        :param dictionary (dict): A dictionary containing the edges of a path
+            and their corresponding rainfall values (output of an experiment).
+
+        :return (tuple): A tuple containing the total length, total time, and
+            rainfall per second along the path.
+        """
+
+        # Lists the edges of the path
+        edge_path = list(dictionary.keys())
+
+        # Prints the total length of the path
+        edge_lengths = [self.grafo.graph.edges[e]['length'] for e in edge_path]
+        total_length = sum(edge_lengths) / 1000
+        print(f"The total distance traveled was {total_length:.3f} km.")
+
+        # Prints the total duration of the path
+        edge_times = [self.grafo.graph.edges[e]['travel_time'] for e in edge_path]
+        total_time = sum(edge_times)
+        print(f"The travel time was {total_time // 60:.0f} minutes and {total_time % 60:.0f} seconds.")
+
+        # Prints the amount of rain along the path
+        edge_rain_per_sec = [dictionary[e] * self.grafo.graph.edges[e]['travel_time'] for e in edge_path]
+        rain_per_sec = sum(edge_rain_per_sec)
+        print(f"The rainfall along the path was: {rain_per_sec:.03f} mm.")
+
+        return total_length, total_time, rain_per_sec
+
 
 @modelo_blueprint.route('/geojson', methods=['POST'])
 def handle_geojson():
@@ -331,22 +563,74 @@ def handle_geojson():
 
     # Getting the json object e transform to dict
     data = request.get_json()
+
+    print(data)
+
+    # Getting the date
+    data_obj = datetime.strptime(data['features'][0]['properties']['date'], '%Y-%m-%dT%H:%M:%S.%fZ')
+
+    # Getting the time
+    #time_obj = datetime.strptime(data['features'][0]['properties']['time'], '%Y-%m-%dT%H:%M:%S.%fZ')
     
+    # Getting the attributes
+    year = data_obj.year
+    month = data_obj.month
+    day = data_obj.day
+    hour = data['features'][0]['properties']['time']['hours']
+    minute = data['features'][0]['properties']['time']['minutes']
+    second = data['features'][0]['properties']['time']['seconds']
+
+    # Instantiate the Agora object
+    agora = Agora(year, month, day, hour, minute, second)
+
     # Getting the data from request
     point1 = data['features'][0]['geometry']['coordinates']
     point2 = data['features'][1]['geometry']['coordinates']
 
+
     # Getting grafo from disk
-    graph = Grafo(point1[1], point2[0], point1[1], point2[0], graph_filename)
+    graph = Grafo(point1[1], point2[1], point1[0], point2[0], graph_filename)
 
-    graph = graph.return_graph()
-    
-    node_start = ox.distance.nearest_nodes(graph, X=point1[1], Y=point1[0])
-    node_end = ox.distance.nearest_nodes(graph, X=point2[1], Y=point2[0])
-    
-    route = nx.astar_path(graph, node_start, node_end, weight='length')
+    # Não sei muito ao certo para o que é usado
+    dlat = -0.0090014
+    dlon = 0.009957
 
-    coordenadas = [(graph.nodes[n]['x'], graph.nodes[n]['y']) for n in route]
+    radar = Radar(point1[1], point1[0], dlat, dlon)
+
+    # graph = graph.return_graph()
+    
+    # node_start = ox.distance.nearest_nodes(graph, X=point1[1], Y=point1[0])
+    # node_end = ox.distance.nearest_nodes(graph, X=point2[1], Y=point2[0])
+    
+    # route = nx.astar_path(graph, node_start, node_end, weight='length')
+
+    # coordenadas = [(graph.nodes[n]['x'], graph.nodes[n]['y']) for n in route]
+
+    example = Experiment(point1, point2, agora, graph, radar)
+
+    edges_rains_dict = {}
+
+    for f in [time_no_rain, length_no_rain, proposed]:
+        print(f.__name__)
+        # Run the experiment
+        edges_rains = example.experiment(f)
+
+        # Save the edges_rains in the dictionary
+        edges_rains_dict[f.__name__] = edges_rains
+
+        # Print the results
+        example.analysis(edges_rains)
+
+    folder_path = 'radar_cache'
+
+    try:
+        shutil.rmtree(folder_path)
+    except FileNotFoundError:
+        pass
+
+
+
+    coordenadas = []
 
     geojson = {
         "type": "Feature",
