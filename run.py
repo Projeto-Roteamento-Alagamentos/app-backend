@@ -2,7 +2,6 @@ import os
 from app import create_app
 import osmnx as ox
 import networkx as nx
-import os
 
 app = create_app()
 

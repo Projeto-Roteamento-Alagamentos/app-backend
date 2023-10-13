@@ -161,6 +161,11 @@ class Grafo:
 
         self.graph = ox.load_graphml(graph_filename)
 
+        # self.graph = ox.graph_from_bbox(lat0, latoo, lon0, lonoo, network_type='drive')
+        # self.graph = ox.add_edge_speeds(self.graph)
+        # self.graph = ox.add_edge_travel_times(self.graph)
+        # self.graph = ox.distance.add_edge_lengths(self.graph)
+
     def return_graph(self):
         return self.graph
         
@@ -441,8 +446,11 @@ class Radar:
         rowcols = [(int((lat - self.lat0) / self.dlat), int((lon - self.lon0) / self.dlon)) for lon, lat in lonlats]
 
         # List the mms of rain in the points of the edge
-        matrix = self.rain_by_time(agora)
-        rainfall = [matrix[row][col] for row, col in rowcols]
+        try:
+            matrix = self.rain_by_time(agora)
+            rainfall = [matrix[row][col] for row, col in rowcols]
+        except:
+            rainfall = [0]
 
         return max(rainfall)
 
@@ -484,17 +492,18 @@ class Experiment:
         start = copy.deepcopy(self.origin)
         time = copy.deepcopy(self.agora)
 
-        print("gaay")
-        graph = self.grafo.crop(self.origin, self.destination)
+        # ANALIZAR O CROP
+        #graph = self.grafo.crop(self.origin, self.destination)
+        graph = self.grafo.graph
+
 
         # Dicionary where we will save infomation about the path
         edge_rains = {}
-        print("gay")
+       
         # Main loop
         while start != self.destination:
 
-            print("gay")
-
+        
             # Update: list of fooded points, matrix with rain info and weigths
             flooding_points = time.get_flooding_points()
 
@@ -553,6 +562,10 @@ class Experiment:
         return total_length, total_time, rain_per_sec
 
 
+def get_coordinates(node_id, graph):
+    node_data = graph.nodes[node_id]
+    return [node_data['x'], node_data['y']]
+
 @modelo_blueprint.route('/geojson', methods=['POST'])
 def handle_geojson():
 
@@ -569,16 +582,25 @@ def handle_geojson():
     # Getting the date
     data_obj = datetime.strptime(data['features'][0]['properties']['date'], '%Y-%m-%dT%H:%M:%S.%fZ')
 
-    # Getting the time
-    #time_obj = datetime.strptime(data['features'][0]['properties']['time'], '%Y-%m-%dT%H:%M:%S.%fZ')
     
     # Getting the attributes
     year = data_obj.year
     month = data_obj.month
     day = data_obj.day
-    hour = data['features'][0]['properties']['time']['hours']
-    minute = data['features'][0]['properties']['time']['minutes']
-    second = data['features'][0]['properties']['time']['seconds']
+
+    try: 
+        # Getting the time
+        time_obj = datetime.strptime(data['features'][0]['properties']['time'], '%Y-%m-%dT%H:%M:%S.%fZ')
+        hour = time_obj.hour
+        minute =time_obj.minute
+        second = time_obj.second
+
+    except:
+        hour = data['features'][0]['properties']['time']['hours']
+        minute = data['features'][0]['properties']['time']['minutes']
+        second = data['features'][0]['properties']['time']['seconds']
+
+    
 
     # Instantiate the Agora object
     agora = Agora(year, month, day, hour, minute, second)
@@ -589,15 +611,24 @@ def handle_geojson():
 
 
     # Getting grafo from disk
-    graph = Grafo(point1[1], point2[1], point1[0], point2[0], graph_filename)
+    graph = Grafo(point1[0], point2[0], point1[1], point2[1], graph_filename)
 
-    # Não sei muito ao certo para o que é usado
+    
     dlat = -0.0090014
     dlon = 0.009957
 
-    radar = Radar(point1[1], point1[0], dlat, dlon)
+    lat0 = -23.7748
+    latoo = -23.2959
+    lon0 = -46.6807
+    lonoo = -46.3841
+    dlat = -0.0090014
+    dlon = 0.009957
 
-    # graph = graph.return_graph()
+
+    radar = Radar(point1[1], point1[0], dlat, dlon)
+    radar = Radar(lat0, lon0, dlat, dlon)
+
+    graph1 = graph.return_graph()
     
     # node_start = ox.distance.nearest_nodes(graph, X=point1[1], Y=point1[0])
     # node_end = ox.distance.nearest_nodes(graph, X=point2[1], Y=point2[0])
@@ -621,24 +652,42 @@ def handle_geojson():
         # Print the results
         example.analysis(edges_rains)
 
+    print(edges_rains_dict)
+
     folder_path = 'radar_cache'
 
     try:
         shutil.rmtree(folder_path)
     except FileNotFoundError:
         pass
-
-
-
-    coordenadas = []
-
+    
     geojson = {
-        "type": "Feature",
-        "geometry": {
-            "type": "LineString",
-            "coordinates": coordenadas
-        },
-        "properties": {}
+        "type": "FeatureCollection",
+        "features": []
     }
+
+    for key in edges_rains_dict:
+        linestring = []
+        for edge, value in edges_rains_dict[key].items():
+            origin, destination, _ = edge
+            origin_coords = get_coordinates(origin, graph1)
+            destination_coords = get_coordinates(destination, graph1)
+            linestring.append([origin_coords, destination_coords])
+
+        feature = {
+            "type": "Feature",
+            "geometry": {
+                "type": "MultiLineString",
+                "coordinates": linestring
+            },
+            "properties": {
+                "name": key,
+                "value": value
+            }
+        }
+
+        geojson["features"].append(feature)
+
+
 
     return jsonify(geojson), 200
