@@ -10,5 +10,8 @@ COPY . /app
 # Instala as dependências
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Baixando Grafo
+RUN python dowload_graph.py
+
 # Define o comando a ser executado ao iniciar o contêiner
 CMD [ "python", "run.py" ]
