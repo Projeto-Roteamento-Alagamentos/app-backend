@@ -2,7 +2,6 @@ import os
 from app import create_app
 import osmnx as ox
 import networkx as nx
-import os
 
 app = create_app()
 
@@ -12,7 +11,7 @@ if __name__ == '__main__':
     place_name = "São Paulo, Brazil"
 
     if not os.path.exists('./app/api/v1/modelo_previsao/graph.graphml'):
-        graph = ox.graph_from_place('Sao Jose dos Campos, Sao Paulo, Brazil', network_type='drive')
+        graph = ox.graph_from_place(place_name, network_type='drive')
         graph = ox.add_edge_speeds(graph)
         graph = ox.add_edge_travel_times(graph)
         graph = ox.distance.add_edge_lengths(graph)
