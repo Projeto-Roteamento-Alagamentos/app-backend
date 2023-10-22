@@ -12,6 +12,8 @@ import shutil
 import os
 import requests
 import pandas as pd
+import math
+import time
 
 
 modelo_blueprint = Blueprint('modelo_previsao', __name__)
@@ -117,11 +119,15 @@ def is_flooded (graph, edge, flooded_points):
     tf = False
     for p in latlons:
         for q in flooded_points:
-            if distance.great_circle(p, q).meters < 200:
+            # MUDEI AQUI
+            #if distance.great_circle(p, q).meters < 200:
+            # Localmente, a Terra é plana
+            if (p[0]-q[0])**2 + (p[1]-q[1])**2 < 2.3*10**(-7):
                 tf = True
                 break
 
     return tf
+
 
 ## Only minimize the time
 def time_no_rain (graph, edge, flooded_points, rains):
@@ -152,7 +158,7 @@ class Grafo:
         :param lon0 (float): Minimum longitude boundary.
         :param lonoo (float): Maximum longitude boundary.
         """
-
+        inicio = time.time()
         self.lat0 = lat0
         self.latoo = latoo
         self.lon0 = lon0
@@ -160,11 +166,18 @@ class Grafo:
         self.graph_filename = graph_filename
 
         self.graph = ox.load_graphml(graph_filename)
-
-        # self.graph = ox.graph_from_bbox(lat0, latoo, lon0, lonoo, network_type='drive')
+        self.graph = self.create_rectangle(lat0, lon0, latoo, lonoo, 0.5)
+        # self.graph = ox.graph_from_bbox(lat0, latoo, lat0, lonoo, network_type='drive')
         # self.graph = ox.add_edge_speeds(self.graph)
         # self.graph = ox.add_edge_travel_times(self.graph)
         # self.graph = ox.distance.add_edge_lengths(self.graph)
+
+        #self.graph = ox.truncate.truncate_graph_bbox(self.graph, bbox_lat_max, bbox_lat_min, bbox_lon_max, bbox_lon_min)
+
+        fim = time.time()
+
+        print(fim - inicio)
+        print("aquiii")
 
     def return_graph(self):
         return self.graph
@@ -192,6 +205,24 @@ class Grafo:
         node = ox.distance.nearest_nodes(graph_proj, x, y, return_dist=False)
 
         return node
+    
+    def create_rectangle(self, lat1, lng1, lat2, lng2, km):
+        # Encontre os pontos extremos
+        min_lat, max_lat = min(lat1, lat2), max(lat1, lat2)
+        min_lng, max_lng = min(lng1, lng2), max(lng1, lng2)
+
+        # Converta a distância de km para graus
+        km_per_degree_lat = 111
+        km_per_degree_lng = 111 * math.cos(math.radians((min_lat + max_lat) / 2))  # Use a latitude média
+
+        # Calcule o retângulo
+        min_lat -= km / km_per_degree_lat
+        max_lat += km / km_per_degree_lat
+        min_lng -= km / km_per_degree_lng
+        max_lng += km / km_per_degree_lng
+
+        return ox.truncate.truncate_graph_bbox(self.graph, max_lat, min_lat, max_lng, min_lng)
+
 
     def crop (self, initial_point, final_point):
         """
@@ -218,6 +249,8 @@ class Grafo:
         lon_min = min(lons)
         lon_max = max(lons)
 
+        print(lat_min, lat_max, lon_max, lon_min)
+
         # Adjust the bounding box to ensure it contains the graph properly and
         # falls within the initial boundaries
         bbox_lat_min = max(self.lat0, lat_min - (lat_max - lat_min))
@@ -225,9 +258,12 @@ class Grafo:
         bbox_lon_min = max(self.lon0, lon_min - (lon_max - lon_min))
         bbox_lon_max = min(self.lonoo, lon_max + (lon_max - lon_min))
 
+        print(bbox_lat_max, bbox_lat_min, bbox_lon_max, bbox_lon_min)
+
         # Crop the graph based on the adjusted bounding box
         self.graph = ox.truncate.truncate_graph_bbox(self.graph, bbox_lat_max, bbox_lat_min, bbox_lon_max, bbox_lon_min)
 
+        print(self.graph)
         return self.graph
 
     def find_edge_by_nodes (self, node1, node2):
@@ -334,6 +370,42 @@ class Agora:
         flooding_points = [convert_coordinates(x, y) for x, y in flooding_points]
 
         return flooding_points
+
+
+# MUDEI AQUI
+def rain_on_graph (graph, radar, agora):
+
+    lat0 = -23.7748
+    latoo = -23.2959
+    lon0 = -46.6807
+    lonoo = -46.3841
+    dlat = -0.0090014
+    dlon = 0.009957
+
+    dictionary = {}
+
+    matrix = radar.rain_by_time(agora)
+
+    for edge in graph.edges:
+        lonlats = []
+
+        initial = edge[0]
+        lon, lat = graph.nodes[initial]['x'], graph.nodes[initial]['y']
+        lonlats.append((lon, lat))
+
+        final = edge[1]
+        lon, lat = graph.nodes[final]['x'], graph.nodes[final]['y']
+        lonlats.append((lon, lat))
+
+        # List the rows and columns of the points of the edge
+        rowcols = [(int((lat - lat0) / dlat), int((lon - lon0) / dlon)) for lon, lat in lonlats]
+
+        # List the mms of rain in the points of the edge
+        rainfall = [matrix[row][col] for row, col in rowcols]
+
+        dictionary[edge] = max(rainfall)
+
+    return dictionary
 
 class Radar:
 
@@ -469,7 +541,7 @@ class Experiment:
         :param radar: An instance of the Radar class that represents the
             radar that will provide information on precipitation.
         """
-
+        
         self.origin = grafo.get_nearest_node(*origin)
         self.destination = grafo.get_nearest_node(*destination)
         self.agora = agora
@@ -491,25 +563,20 @@ class Experiment:
         # Parameters
         start = copy.deepcopy(self.origin)
         time = copy.deepcopy(self.agora)
-
-        # ANALIZAR O CROP
-        #graph = self.grafo.crop(self.origin, self.destination)
-        graph = self.grafo.graph
-
+        graph = self.grafo.crop(self.origin, self.destination)
 
         # Dicionary where we will save infomation about the path
         edge_rains = {}
-       
+
         # Main loop
         while start != self.destination:
 
-        
             # Update: list of fooded points, matrix with rain info and weigths
             flooding_points = time.get_flooding_points()
 
             if self.radar.rain_by_time(time):
-                A = self.radar.rain_by_time(time)
-                rains = {e: self.radar.rain_at_edge(graph, e, time) for e in graph.edges}
+                # MUDEI AQUI
+                rains = rain_on_graph(graph, self.radar, time) #{e: self.radar.rain_at_edge(graph, e, time) for e in graph.edges}
                 weights = {e: weight(graph, e, flooding_points, rains) for e in graph.edges}
                 nx.set_edge_attributes(graph, weights, 'weight')
             else:
@@ -530,37 +597,6 @@ class Experiment:
 
         return edge_rains
 
-    def analysis (self, dictionary):
-        """
-        Prints the results of the output of an experiment.
-
-        :param dictionary (dict): A dictionary containing the edges of a path
-            and their corresponding rainfall values (output of an experiment).
-
-        :return (tuple): A tuple containing the total length, total time, and
-            rainfall per second along the path.
-        """
-
-        # Lists the edges of the path
-        edge_path = list(dictionary.keys())
-
-        # Prints the total length of the path
-        edge_lengths = [self.grafo.graph.edges[e]['length'] for e in edge_path]
-        total_length = sum(edge_lengths) / 1000
-        print(f"The total distance traveled was {total_length:.3f} km.")
-
-        # Prints the total duration of the path
-        edge_times = [self.grafo.graph.edges[e]['travel_time'] for e in edge_path]
-        total_time = sum(edge_times)
-        print(f"The travel time was {total_time // 60:.0f} minutes and {total_time % 60:.0f} seconds.")
-
-        # Prints the amount of rain along the path
-        edge_rain_per_sec = [dictionary[e] * self.grafo.graph.edges[e]['travel_time'] for e in edge_path]
-        rain_per_sec = sum(edge_rain_per_sec)
-        print(f"The rainfall along the path was: {rain_per_sec:.03f} mm.")
-
-        return total_length, total_time, rain_per_sec
-
 
 def get_coordinates(node_id, graph):
     node_data = graph.nodes[node_id]
@@ -569,6 +605,7 @@ def get_coordinates(node_id, graph):
 @modelo_blueprint.route('/geojson', methods=['POST'])
 def handle_geojson():
 
+    inicio = time.time()
     data = request.data
 
     if not data:
@@ -609,10 +646,9 @@ def handle_geojson():
     point1 = data['features'][0]['geometry']['coordinates']
     point2 = data['features'][1]['geometry']['coordinates']
 
-
+    print(point1)
     # Getting grafo from disk
-    graph = Grafo(point1[0], point2[0], point1[1], point2[1], graph_filename)
-
+    #graph = Grafo(point1[0], point2[0], point1[1], point2[1], graph_filename)
     
     dlat = -0.0090014
     dlon = 0.009957
@@ -624,9 +660,12 @@ def handle_geojson():
     dlat = -0.0090014
     dlon = 0.009957
 
+    graph = Grafo(lat0, latoo, lon0, lonoo, graph_filename)
 
-    radar = Radar(point1[1], point1[0], dlat, dlon)
-    radar = Radar(lat0, lon0, dlat, dlon)
+
+
+    radar = Radar(point1[0], point1[1], dlat, dlon)
+    # radar = Radar(lat0, lon0, dlat, dlon)
 
     graph1 = graph.return_graph()
     
@@ -640,8 +679,9 @@ def handle_geojson():
     example = Experiment(point1, point2, agora, graph, radar)
 
     edges_rains_dict = {}
+    print("inicio proposed")
 
-    for f in [time_no_rain, length_no_rain, proposed]:
+    for f in [proposed, time_no_rain, length_no_rain]:
         print(f.__name__)
         # Run the experiment
         edges_rains = example.experiment(f)
@@ -650,9 +690,9 @@ def handle_geojson():
         edges_rains_dict[f.__name__] = edges_rains
 
         # Print the results
-        example.analysis(edges_rains)
+        #example.analysis(edges_rains)
 
-    print(edges_rains_dict)
+
 
     folder_path = 'radar_cache'
 
@@ -665,7 +705,7 @@ def handle_geojson():
         "type": "FeatureCollection",
         "features": []
     }
-
+   # print(flooding_points)
     for key in edges_rains_dict:
         linestring = []
         for edge, value in edges_rains_dict[key].items():
@@ -688,6 +728,16 @@ def handle_geojson():
 
         geojson["features"].append(feature)
 
+    # points = {
+    #     "type": "Feature",
+    #     "geometry": {
+    #         "type": "MultiLineString",
+    #         "coordinates": flooding_points[0][0]
+    #     },
+    #     "properties": {}
+    # }
 
-
+    # geojson['features'].append(points)
+    fim = time.time()
+    print(fim - inicio)
     return jsonify(geojson), 200
