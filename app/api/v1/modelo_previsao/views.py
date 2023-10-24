@@ -679,9 +679,19 @@ def handle_geojson():
     example = Experiment(point1, point2, agora, graph, radar)
 
     edges_rains_dict = {}
-    print("inicio proposed")
+    print(data['features'][0]['properties']['models'])
 
-    for f in [proposed, time_no_rain, length_no_rain]:
+    functions = []
+    if "proposed" in data['features'][0]['properties']['models']:
+         functions.append(proposed)
+
+    if "time_no_rain" in data['features'][0]['properties']['models']:
+         functions.append(time_no_rain)
+
+    if "length_no_rain" in data['features'][0]['properties']['models']:
+         functions.append(length_no_rain)
+
+    for f in functions:
         print(f.__name__)
         # Run the experiment
         edges_rains = example.experiment(f)
